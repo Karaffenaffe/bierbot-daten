@@ -104,3 +104,15 @@ jobs:
             git push origin main
 
           fi
+
+      - name: Telegram Alarm vorbereiten
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+            echo "Telegram-Zugangsdaten vorhanden"
+          else
+            echo "Telegram-Zugangsdaten fehlen"
+            exit 1
+          fi
