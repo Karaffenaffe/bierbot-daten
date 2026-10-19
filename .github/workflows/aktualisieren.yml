@@ -34,21 +34,21 @@ jobs:
                       "Accept": "text/html",
                   },
               )
+   
               with urllib.request.urlopen(req, timeout=30) as res:
-                if res.status != 200:
-                 raise ValueError("HTTP-Fehler")
-                 
-                print(f"=== Diagnose {nutzer} ===")
-                for feld in [
-                    "Date",
-                    "Age",
-                    "Cache-Control",
-                    "CF-Cache-Status",
-                    "ETag",
-                ]:
-                    print(f"{feld}: {res.headers.get(feld, 'nicht vorhanden')}")
+                  if res.status != 200:
+                      raise ValueError("HTTP-Fehler")
+                  print(f"=== Diagnose {nutzer} ===")
+                  for feld in [
+                      "Date",
+                      "Age",
+                      "Cache-Control",
+                      "CF-Cache-Status",
+                      "ETag",
+                  ]:
+                      print(f"{feld}: {res.headers.get(feld, 'nicht vorhanden')}")
+                  seite = res.read().decode("utf-8", "replace")
 
-                 seite = res.read().decode("utf-8", "replace")
 
               seite = re.sub(
                   r"<(script|style)\b[^>]*>.*?</\1>",
