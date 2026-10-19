@@ -1,109 +1,118 @@
 
-      - name: Telegram Bieralarm
+name: Bierbot Daten aktualisieren
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7 * * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  aktualisieren:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository laden
+        uses: actions/checkout@v4
+
+      - name: Bierstaende abrufen
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          import html
+          import urllib.request
+          from datetime import datetime, timezone
+
+          def lese_unique(nutzer):
+              url = f"https://untappd.com/user/{nutzer}"
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "Mozilla/5.0",
+                      "Accept": "text/html",
+                  },
+              )
+   
+              with urllib.request.urlopen(req, timeout=30) as res:
+                  if res.status != 200:
+                      raise ValueError("HTTP-Fehler")
+                  print(f"=== Diagnose {nutzer} ===")
+                  for feld in [
+                      "Date",
+                      "Age",
+                      "Cache-Control",
+                      "CF-Cache-Status",
+                      "ETag",
+                  ]:
+                      print(f"{feld}: {res.headers.get(feld, 'nicht vorhanden')}")
+                  seite = res.read().decode("utf-8", "replace")
+
+
+              seite = re.sub(
+                  r"<(script|style)\b[^>]*>.*?</\1>",
+                  " ", seite, flags=re.I | re.S
+              )
+              seite = re.sub(r"<[^>]+>", " ", seite)
+              seite = html.unescape(seite)
+              seite = re.sub(r"\s+", " ", seite)
+
+              treffer = re.findall(
+                  r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+Unique\b",
+                  seite, flags=re.I
+              )
+              if len(treffer) != 1:
+                  raise ValueError(
+                      f"Keine eindeutige Unique-Zahl fuer {nutzer}"
+                  )
+              zahl = int(treffer[0].replace(",", ""))
+              if zahl <= 0:
+                  raise ValueError("Ungueltige Zahl")
+              return zahl
+
+          karaffe = lese_unique("Karaffenaffe")
+          fettleber = lese_unique("Fettleber")
+
+          daten = {
+              "karaffenaffe": karaffe,
+              "fettleber": fettleber,
+              "vorsprung": karaffe - fettleber,
+              "status": "ok",
+              "messung": datetime.now(
+                  timezone.utc
+              ).isoformat(timespec="seconds")
+          }
+
+          with open("bierstand.json", "w", encoding="utf-8") as f:
+              json.dump(daten, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+
+          print("Karaffenaffe:", karaffe)
+          print("Fettleber:", fettleber)
+          print("Vorsprung:", karaffe - fettleber)
+          PY
+
+      - name: Neue Daten speichern
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bierstand.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Bierstand aktualisieren"
+            git pull --rebase origin main
+            git push origin main
+
+          fi
+
+      - name: Telegram Alarm vorbereiten
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python - <<'PY'
-          import json
-          import os
-          import urllib.parse
-          import urllib.request
-          from datetime import datetime
-          from pathlib import Path
-          from zoneinfo import ZoneInfo
-
-          jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
-          heute = jetzt.date().isoformat()
-
-          with open("bierstand.json", encoding="utf-8") as f:
-              daten = json.load(f)
-
-          if daten.get("status") != "ok":
-              raise ValueError("Keine gueltige Messung")
-
-          abstand = int(daten["vorsprung"])
-          datei = Path("alarm-status.json")
-
-          if datei.exists():
-              zustand = json.loads(
-                  datei.read_text(encoding="utf-8")
-              )
-          else:
-              zustand = {}
-
-          vorher_unter30 = zustand.get("unter30", False)
-          unter30 = abstand < 30
-
-          erster_alarm = unter30 and not vorher_unter30
-
-          erinnerung = (
-              unter30
-              and jetzt.hour >= 17
-              and zustand.get("letzte_erinnerung") != heute
-          )
-
-          if erster_alarm or erinnerung:
-              if erster_alarm:
-                  titel = "🚨🍺 Fettleber ist dir auf den Fersen!"
-              else:
-                  titel = "🔔🍺 Aufholen, ziehs dir ryan!"
-
-              nachricht = (
-                  f"{titel}\n\n"
-                  f"Karaffenaffe: {daten['karaffenaffe']} Unique\n"
-                  f"Fettleber: {daten['fettleber']} Unique\n\n"
-                  f"Dein Vorsprung: {abstand} Biere\n"
-                  "Du liegst unter der 30-Biere-Grenze!\n\n"
-                  f"Messzeit (UTC): {daten['messung']}"
-              )
-
-              token = os.environ["BOT_TOKEN"]
-              chat_id = os.environ["CHAT_ID"]
-
-              post = urllib.parse.urlencode({
-                  "chat_id": chat_id,
-                  "text": nachricht
-              }).encode("utf-8")
-
-              request = urllib.request.Request(
-                  f"https://api.telegram.org/bot{token}/sendMessage",
-                  data=post,
-                  method="POST"
-              )
-
-              try:
-                  with urllib.request.urlopen(
-                      request, timeout=20
-                  ) as antwort:
-                      ergebnis = json.load(antwort)
-                  if not ergebnis.get("ok"):
-                      raise RuntimeError()
-              except Exception:
-                  raise RuntimeError(
-                      "Telegram-Nachricht fehlgeschlagen"
-                  ) from None
-
-              print("Telegram-Nachricht erfolgreich gesendet")
-
-              if erinnerung:
-                  zustand["letzte_erinnerung"] = heute
-          else:
-              print("Keine Telegram-Nachricht notwendig")
-
-          zustand["unter30"] = unter30
-
-          datei.write_text(
-              json.dumps(zustand, indent=2) + "\n",
-              encoding="utf-8"
-          )
-          PY
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add alarm-status.json
-          if ! git diff --cached --quiet; then
-            git commit -m "Bieralarm-Status aktualisieren"
-            git pull --rebase origin main
-            git push origin main
+          if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+            echo "Telegram-Zugangsdaten vorhanden"
+          else
+            echo "Telegram-Zugangsdaten fehlen"
+            exit 1
           fi
