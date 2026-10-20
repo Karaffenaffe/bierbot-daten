@@ -3,8 +3,18 @@ name: Bierbot Daten aktualisieren
 
 on:
   workflow_dispatch:
+    inputs:
+      resume_untappd:
+        description: 'Abrufe nach HTTP 403/429 bewusst wieder freigeben'
+        type: boolean
+        default: false
   schedule:
     - cron: '7 * * * *'
+    - cron: '22,37,52 * * * *'
+
+concurrency:
+  group: bierbot-daten-aktualisieren
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -16,126 +26,79 @@ jobs:
       - name: Repository laden
         uses: actions/checkout@v4
 
-      - name: Bierstaende abrufen
-        run: |
-          python - <<'PY'
-          import json
-          import re
-          import html
-          import urllib.request
-          from datetime import datetime, timezone
+      - name: Bierstaende abrufen oder Abruf pausieren
+        id: abruf
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          RESUME_UNTAPPD: ${{ inputs.resume_untappd }}
+        run: python scripts/untappd_abruf.py
 
-          def lese_unique(nutzer):
-              url = f"https://untappd.com/user/{nutzer}"
-              req = urllib.request.Request(
-                  url,
-                  headers={
-                      "User-Agent": "Mozilla/5.0",
-                      "Accept": "text/html",
-                  },
-              )
-   
-              with urllib.request.urlopen(req, timeout=30) as res:
-                  if res.status != 200:
-                      raise ValueError("HTTP-Fehler")
-                  print(f"=== Diagnose {nutzer} ===")
-                  for feld in [
-                      "Date",
-                      "Age",
-                      "Cache-Control",
-                      "CF-Cache-Status",
-                      "ETag",
-                  ]:
-                      print(f"{feld}: {res.headers.get(feld, 'nicht vorhanden')}")
-                  seite = res.read().decode("utf-8", "replace")
-
-
-              seite = re.sub(
-                  r"<(script|style)\b[^>]*>.*?</\1>",
-                  " ", seite, flags=re.I | re.S
-              )
-              seite = re.sub(r"<[^>]+>", " ", seite)
-              seite = html.unescape(seite)
-              seite = re.sub(r"\s+", " ", seite)
-
-              treffer = re.findall(
-                  r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+Unique\b",
-                  seite, flags=re.I
-              )
-              if len(treffer) != 1:
-                  raise ValueError(
-                      f"Keine eindeutige Unique-Zahl fuer {nutzer}"
-                  )
-              zahl = int(treffer[0].replace(",", ""))
-              if zahl <= 0:
-                  raise ValueError("Ungueltige Zahl")
-
-          
-              total_treffer = re.findall(
-                  r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+Total\b",
-                  seite, flags=re.I
-              )
-              if len(total_treffer) != 1:
-                  raise ValueError(
-                      f"Keine eindeutige Total-Zahl fuer {nutzer}"
-                  )
-              gesamt = int(total_treffer[0].replace(",", ""))
-              return zahl, gesamt
-
-
-          karaffe, karaffe_total = lese_unique("Karaffenaffe")
-          fettleber, fettleber_total = lese_unique("Fettleber")
-
-          
-          vorher_total = None
-          try:
-              with open("bierstand.json", encoding="utf-8") as f:
-                  vorherige_daten = json.load(f)
-              vorher_total = vorherige_daten.get("fettleber_total")
-          except FileNotFoundError:
-              pass
-
-          neue_checkins = 0
-          if vorher_total is not None:
-              neue_checkins = max(
-                  0, fettleber_total - int(vorher_total)
-              )
-
-
-          daten = {
-              "karaffenaffe": karaffe,
-              "fettleber": fettleber,
-              "fettleber_total": fettleber_total,
-              "fettleber_neue_checkins": neue_checkins,
-              "vorsprung": karaffe - fettleber,
-              "status": "ok",
-              "messung": datetime.now(
-                  timezone.utc
-              ).isoformat(timespec="seconds")
-          }
-
-          with open("bierstand.json", "w", encoding="utf-8") as f:
-              json.dump(daten, f, ensure_ascii=False, indent=2)
-              f.write("\n")
-
-          print("Karaffenaffe:", karaffe)
-          print("Fettleber:", fettleber)
-          print("Vorsprung:", karaffe - fettleber)
-          PY
-
-      - name: Neue Daten speichern
+      - name: Abrufzustand und Bierstand speichern
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add bierstand.json
+          git add bierstand.json alarm-status.json
           if ! git diff --cached --quiet; then
-            git commit -m "Bierstand aktualisieren"
+            git commit -m "Bierstand und Abrufzustand aktualisieren"
             git pull --rebase origin main
             git push origin main
-
           fi
 
+      - name: Einmalige Untappd-Fehlernachricht
+        if: steps.abruf.outputs.notify == 'true'
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          pfad = Path("alarm-status.json")
+          zustand = json.loads(pfad.read_text(encoding="utf-8"))
+          abruf = zustand["untappd_abruf"]
+          if abruf["modus"] == "pausiert":
+              text = (
+                  f"🚫 Untappd HTTP {abruf['http_status']}: Abrufe pausiert. "
+                  "Bitte Ursache prüfen und danach den Workflow mit "
+                  "'resume_untappd' manuell starten."
+              )
+          else:
+              text = (
+                  f"⚠️ Untappd HTTP {abruf['http_status']}: "
+                  "Abrufe für den Rest des Berliner Tages nur stündlich. "
+                  "Morgen wieder alle 15 Minuten."
+              )
+          post = urllib.parse.urlencode({
+              "chat_id": os.environ["CHAT_ID"], "text": text
+          }).encode("utf-8")
+          req = urllib.request.Request(
+              "https://api.telegram.org/bot" + os.environ["BOT_TOKEN"]
+              + "/sendMessage", data=post, method="POST"
+          )
+          with urllib.request.urlopen(req, timeout=20) as res:
+              antwort = json.load(res)
+          if not antwort.get("ok"):
+              raise RuntimeError("Telegram-Versand fehlgeschlagen")
+          abruf["benachrichtigt"] = True
+          pfad.write_text(
+              json.dumps(zustand, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8"
+          )
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add alarm-status.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Untappd-Fehlerbenachrichtigung speichern"
+            git pull --rebase origin main
+            git push origin main
+          fi
       - name: Telegram Bieralarm
+        if: steps.abruf.outputs.fetch == 'true'
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -248,6 +211,7 @@ jobs:
 
           
       - name: Fettleber Check-in Nachricht
+        if: steps.abruf.outputs.fetch == 'true'
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
