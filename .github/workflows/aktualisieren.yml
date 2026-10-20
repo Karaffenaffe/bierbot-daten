@@ -69,14 +69,25 @@ jobs:
               zahl = int(treffer[0].replace(",", ""))
               if zahl <= 0:
                   raise ValueError("Ungueltige Zahl")
-              return zahl
 
-          karaffe = lese_unique("Karaffenaffe")
-          fettleber = lese_unique("Fettleber")
+          total_treffer = re.findall(
+              r"(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+Total\b",
+              seite, flags=re.I
+          )
+          if len(total_treffer) != 1:
+              raise ValueError(
+                  f"Keine eindeutige Total-Zahl fuer {nutzer}"
+              )
+          gesamt = int(total_treffer[0].replace(",", ""))
+          return zahl, gesamt
+
+          karaffe, karaffe_total = lese_unique("Karaffenaffe")
+          fettleber, fettleber_total = lese_unique("Fettleber")
 
           daten = {
               "karaffenaffe": karaffe,
               "fettleber": fettleber,
+              "fettleber_total": fettleber_total,
               "vorsprung": karaffe - fettleber,
               "status": "ok",
               "messung": datetime.now(
