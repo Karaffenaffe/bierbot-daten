@@ -135,7 +135,6 @@ jobs:
 
           fi
 
-
       - name: Telegram Bieralarm
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
