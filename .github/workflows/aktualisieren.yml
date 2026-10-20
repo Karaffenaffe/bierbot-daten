@@ -86,10 +86,27 @@ jobs:
           karaffe, karaffe_total = lese_unique("Karaffenaffe")
           fettleber, fettleber_total = lese_unique("Fettleber")
 
+          
+          vorher_total = None
+          try:
+              with open("bierstand.json", encoding="utf-8") as f:
+                  vorherige_daten = json.load(f)
+              vorher_total = vorherige_daten.get("fettleber_total")
+          except FileNotFoundError:
+              pass
+
+          neue_checkins = 0
+          if vorher_total is not None:
+              neue_checkins = max(
+                  0, fettleber_total - int(vorher_total)
+              )
+
+
           daten = {
               "karaffenaffe": karaffe,
               "fettleber": fettleber,
               "fettleber_total": fettleber_total,
+              "fettleber_neue_checkins": neue_checkins,
               "vorsprung": karaffe - fettleber,
               "status": "ok",
               "messung": datetime.now(
