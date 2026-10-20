@@ -135,14 +135,115 @@ jobs:
 
           fi
 
-      - name: Telegram Alarm vorbereiten
+
+      - name: Telegram Bieralarm
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
-            echo "Telegram-Zugangsdaten vorhanden"
-          else
-            echo "Telegram-Zugangsdaten fehlen"
-            exit 1
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+
+          daten = json.loads(
+              Path("bierstand.json").read_text(encoding="utf-8")
+          )
+
+          if daten.get("status") != "ok":
+              raise ValueError("Bierstand ungueltig")
+
+          messung = datetime.fromisoformat(daten["messung"])
+          if messung.tzinfo is None:
+              raise ValueError("Messzeit ohne Zeitzone")
+          alter = (
+              datetime.now(timezone.utc) -
+              messung.astimezone(timezone.utc)
+          ).total_seconds()
+          if alter < -300 or alter > 7200:
+              raise ValueError("Bierstand nicht aktuell genug")
+
+          jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
+          heute = jetzt.date().isoformat()
+          vorsprung = int(daten["vorsprung"])
+          unter30 = vorsprung < 30
+
+          pfad = Path("alarm-status.json")
+          zustand = (
+              json.loads(pfad.read_text(encoding="utf-8"))
+              if pfad.exists() else {}
+          )
+
+          vorher = zustand.get("unter30", False)
+          erster_alarm = unter30 and not vorher
+
+          erinnerung = (
+              unter30
+              and jetzt.hour >= 17
+              and zustand.get("letzte_erinnerung") != heute
+          )
+
+          if erster_alarm or erinnerung:
+              if erster_alarm:
+                  titel = "🚨🍺 Fettleber ist dir auf den Fersen!"
+              else:
+                  titel = "🔔🍺 Aufholen, ziehs dir ryan!"
+
+              nachricht = (
+                  f"{titel}\n\n"
+                  f"Karaffenaffe: {daten['karaffenaffe']} Unique\n"
+                  f"Fettleber: {daten['fettleber']} Unique\n"
+                  f"Vorsprung: {vorsprung} Biere\n\n"
+                  f"Zuletzt abgerufen: {daten['messung']}"
+              )
+
+              post = urllib.parse.urlencode({
+                  "chat_id": os.environ["CHAT_ID"],
+                  "text": nachricht
+              }).encode("utf-8")
+
+              req = urllib.request.Request(
+                  "https://api.telegram.org/bot"
+                  + os.environ["BOT_TOKEN"]
+                  + "/sendMessage",
+                  data=post,
+                  method="POST"
+              )
+
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as res:
+                      antwort = json.load(res)
+                  if not antwort.get("ok"):
+                      raise ValueError("Telegram meldet Fehler")
+              except Exception:
+                  raise RuntimeError(
+                      "Telegram-Versand fehlgeschlagen"
+                  ) from None
+
+              print("Telegram-Nachricht verschickt")
+
+              if erinnerung:
+                  zustand["letzte_erinnerung"] = heute
+          else:
+              print("Kein Telegram-Alarm erforderlich")
+
+          zustand["unter30"] = unter30
+          pfad.write_text(
+              json.dumps(zustand, indent=2) + "\n",
+              encoding="utf-8"
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add alarm-status.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Bieralarm Status speichern"
+            git pull --rebase origin main
+            git push origin main
           fi
+
