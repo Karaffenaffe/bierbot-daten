@@ -1,3 +1,9 @@
 {
-  "unter30": false
+  "unter30": false,
+  "untappd_abruf": {
+    "modus": "pausiert",
+    "datum": "2026-10-20",
+    "http_status": 403,
+    "benachrichtigt": false
+  }
 }
