@@ -5,6 +5,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,11 @@ from zoneinfo import ZoneInfo
 STATUS_FILE = Path("alarm-status.json")
 DATA_FILE = Path("bierstand.json")
 BERLIN = ZoneInfo("Europe/Berlin")
+MAX_CACHE_AGE = 15 * 60
+
+
+class StaleProfileError(Exception):
+    pass
 
 
 def save_json(path, value):
@@ -27,9 +33,20 @@ def output(**values):
 
 
 def lese_unique(nutzer):
+    # Cloudflare's normal profile URL is cached for four hours. A stable key
+    # per 15-minute slot avoids extra retries within a slot while allowing
+    # the next scheduled run to request a fresh representation.
+    slot = int(datetime.now(timezone.utc).timestamp()) // MAX_CACHE_AGE
+    url = f"https://untappd.com/user/{nutzer}?" + urllib.parse.urlencode(
+        {"bierbot_refresh": slot}
+    )
     req = urllib.request.Request(
-        f"https://untappd.com/user/{nutzer}",
-        headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"},
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html",
+            "Cache-Control": "no-cache",
+        },
     )
     with urllib.request.urlopen(req, timeout=30) as res:
         if res.status != 200:
@@ -37,6 +54,9 @@ def lese_unique(nutzer):
         print(f"=== Diagnose {nutzer} ===")
         for feld in ("Date", "Age", "Cache-Control", "CF-Cache-Status", "ETag"):
             print(f"{feld}: {res.headers.get(feld, 'nicht vorhanden')}")
+        age = res.headers.get("Age")
+        if age is not None and int(age) > MAX_CACHE_AGE:
+            raise StaleProfileError(f"{nutzer}: Cache bereits {age} Sekunden alt")
         seite = res.read().decode("utf-8", "replace")
 
     seite = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", seite, flags=re.I | re.S)
@@ -99,6 +119,10 @@ def main():
         save_json(STATUS_FILE, zustand)
         print(f"Untappd HTTP {code}: Modus {modus}")
         output(fetch="false", notify=str(not abruf["benachrichtigt"]).lower())
+        return
+    except StaleProfileError as fehler:
+        print(f"::warning::{fehler}; vorhandenen Bierstand nicht als frisch speichern")
+        output(fetch="false", notify="false")
         return
 
     vorherige_daten = json.loads(DATA_FILE.read_text(encoding="utf-8")) if DATA_FILE.exists() else {}
