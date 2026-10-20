@@ -246,3 +246,77 @@ jobs:
             git push origin main
           fi
 
+          
+      - name: Fettleber Check-in Nachricht
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+
+          daten = json.loads(
+              Path("bierstand.json").read_text(encoding="utf-8")
+          )
+
+          jetzt = datetime.now(ZoneInfo("Europe/Berlin"))
+          biertag = (jetzt - timedelta(hours=6)).date().isoformat()
+
+          zustandsdatei = Path("alarm-status.json")
+          zustand = json.loads(
+              zustandsdatei.read_text(encoding="utf-8")
+          )
+
+          neue = int(daten.get("fettleber_neue_checkins", 0))
+          schon_gemeldet = (
+              zustand.get("letzter_checkin_biertag") == biertag
+          )
+
+          if neue > 0 and not schon_gemeldet:
+              text = "🍺 Fettleber checkt ein"
+
+              post = urllib.parse.urlencode({
+                  "chat_id": os.environ["CHAT_ID"],
+                  "text": text
+              }).encode("utf-8")
+
+              req = urllib.request.Request(
+                  "https://api.telegram.org/bot"
+                  + os.environ["BOT_TOKEN"]
+                  + "/sendMessage",
+                  data=post,
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=20) as res:
+                  antwort = json.load(res)
+
+              if not antwort.get("ok"):
+                  raise RuntimeError("Telegram-Versand fehlgeschlagen")
+
+              zustand["letzter_checkin_biertag"] = biertag
+              zustandsdatei.write_text(
+                  json.dumps(zustand, indent=2) + "\n",
+                  encoding="utf-8"
+              )
+              print("Erste Check-in-Nachricht versendet")
+          else:
+              print("Keine neue Check-in-Nachricht notwendig")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add alarm-status.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Check-in Benachrichtigung speichern"
+            git pull --rebase origin main
+            git push origin main
+          fi
+
+
