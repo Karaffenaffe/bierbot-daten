@@ -97,6 +97,33 @@ class AbrufTests(unittest.TestCase):
         self.assertNotIn("untappd_abruf", self.status_json())
         self.assertEqual(self.output(), {"fetch": "true", "notify": "false"})
 
+    def test_cache_key_changes_by_quarter_and_stale_page_is_not_saved(self):
+        class Response:
+            status = 200
+            headers = {"Age": "12224", "CF-Cache-Status": "HIT"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+        with patch.object(abruf.urllib.request, "urlopen", return_value=Response()) as fetch:
+            abruf.main()
+        self.assertEqual(fetch.call_count, 1)
+        request = fetch.call_args.args[0]
+        self.assertIn("bierbot_refresh=", request.full_url)
+        self.assertEqual(request.get_header("Cache-control"), "no-cache")
+        self.assertEqual(self.output(), {"fetch": "false", "notify": "false"})
+        self.assertEqual(json.loads(self.data.read_text(encoding="utf-8")), {"fettleber_total": 100})
+
+        first_url = request.full_url
+        Clock.current = datetime(2026, 10, 20, 12, 37, tzinfo=abruf.BERLIN)
+        with patch.object(abruf.urllib.request, "urlopen", return_value=Response()) as fetch:
+            with self.assertRaises(abruf.StaleProfileError):
+                abruf.lese_unique("Karaffenaffe")
+        self.assertNotEqual(first_url, fetch.call_args.args[0].full_url)
+
 
 if __name__ == "__main__":
     unittest.main()
