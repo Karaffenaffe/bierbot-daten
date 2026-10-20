@@ -4,6 +4,6 @@
     "modus": "pausiert",
     "datum": "2026-10-20",
     "http_status": 403,
-    "benachrichtigt": false
+    "benachrichtigt": true
   }
 }
