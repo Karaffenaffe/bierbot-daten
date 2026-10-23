@@ -66,8 +66,9 @@ class AbrufTests(unittest.TestCase):
         self.assertEqual(self.output(), {"fetch": "false", "notify": "true"})
         self.assertEqual(json.loads(self.data.read_text(encoding="utf-8")), {"fettleber_total": 100})
 
-        pause["benachrichtigt"] = True
-        self.status.write_text(json.dumps(self.status_json()), encoding="utf-8")
+        state = self.status_json()
+        state["untappd_abruf"]["benachrichtigt"] = True
+        self.status.write_text(json.dumps(state), encoding="utf-8")
         Clock.current = datetime(2026, 10, 21, 12, 22, tzinfo=abruf.BERLIN)
         self.outputs.write_text("", encoding="utf-8")
         with patch.object(abruf, "lese_unique") as fetch:
