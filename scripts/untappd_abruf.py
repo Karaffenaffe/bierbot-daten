@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 STATUS_FILE = Path("alarm-status.json")
 DATA_FILE = Path("bierstand.json")
 BERLIN = ZoneInfo("Europe/Berlin")
-MAX_CACHE_AGE = 15 * 60
+MAX_CACHE_AGE = 60 * 60
 
 
 class StaleProfileError(Exception):
@@ -33,9 +33,8 @@ def output(**values):
 
 
 def lese_unique(nutzer):
-    # Cloudflare's normal profile URL is cached for four hours. A stable key
-    # per 15-minute slot avoids extra retries within a slot while allowing
-    # the next scheduled run to request a fresh representation.
+    # A stable key per hourly slot avoids duplicate cache keys within one
+    # scheduled interval while allowing the next hourly run to request a fresh representation.
     slot = int(datetime.now(timezone.utc).timestamp()) // MAX_CACHE_AGE
     url = f"https://untappd.com/user/{nutzer}?" + urllib.parse.urlencode(
         {"bierbot_refresh": slot}
@@ -86,43 +85,35 @@ def main():
         zustand.pop("untappd_abruf", None)
         save_json(STATUS_FILE, zustand)
         print("Untappd-Abruf manuell freigegeben")
-    elif abruf.get("modus") == "stuendlich" and abruf.get("datum") != heute:
-        abruf = {}
-        zustand.pop("untappd_abruf", None)
-        save_json(STATUS_FILE, zustand)
-        print("Neuer Berliner Kalendertag: wieder viertelstuendlich")
-
-    if abruf.get("modus") == "pausiert":
-        print("Untappd-Abruf wegen HTTP 403/429 pausiert")
-        output(fetch="false", notify=str(not abruf.get("benachrichtigt", False)).lower())
-        return
-    if abruf.get("modus") == "stuendlich" and os.environ.get("SCHEDULE") != "7 * * * *":
-        print("Viertelstundenlauf im Stundenmodus uebersprungen")
+    elif abruf.get("modus") in ("pausiert", "stuendlich"):
+        # Legacy hourly throttling is now a permanent stop as well. No date
+        # change clears a pause; only the explicit manual resume does that.
+        if abruf.get("modus") == "stuendlich":
+            abruf["modus"] = "pausiert"
+            abruf.setdefault("fehler", "Vorheriger Untappd-Fehler")
+            zustand["untappd_abruf"] = abruf
+            save_json(STATUS_FILE, zustand)
+        print("Untappd-Abruf pausiert; manuelle Freigabe erforderlich")
         output(fetch="false", notify=str(not abruf.get("benachrichtigt", False)).lower())
         return
 
     try:
         karaffe, _ = lese_unique("Karaffenaffe")
         fettleber, fettleber_total = lese_unique("Fettleber")
-    except urllib.error.HTTPError as fehler:
-        code = fehler.code
-        if code in (403, 429):
-            modus = "pausiert"
-        elif code == 408 or 500 <= code <= 599:
-            modus = "stuendlich"
-        else:
-            raise
-        # Keep the first incident's notification state during this Berlin day.
-        if not (abruf.get("modus") == modus and abruf.get("datum") == heute):
-            abruf = {"modus": modus, "datum": heute, "http_status": code, "benachrichtigt": False}
+    except Exception as fehler:
+        code = fehler.code if isinstance(fehler, urllib.error.HTTPError) else None
+        beschreibung = f"HTTP {code}" if code is not None else type(fehler).__name__
+        abruf = {
+            "modus": "pausiert",
+            "datum": heute,
+            "http_status": code,
+            "fehler": beschreibung,
+            "benachrichtigt": False,
+        }
         zustand["untappd_abruf"] = abruf
         save_json(STATUS_FILE, zustand)
-        print(f"Untappd HTTP {code}: Modus {modus}")
-        output(fetch="false", notify=str(not abruf["benachrichtigt"]).lower())
-        return
-    except StaleProfileError as fehler:
-        print(f"::warning::{fehler}; vorhandenen Bierstand nicht als frisch speichern")
-        output(fetch="false", notify="false")
+        print(f"Untappd-Abruffehler ({beschreibung}): Abruf dauerhaft pausiert")
+        output(fetch="false", notify="true")
         return
 
     vorherige_daten = json.loads(DATA_FILE.read_text(encoding="utf-8")) if DATA_FILE.exists() else {}
