@@ -4,6 +4,8 @@ import html
 import json
 import os
 import re
+import random
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -96,6 +98,12 @@ def main():
         print("Untappd-Abruf pausiert; manuelle Freigabe erforderlich")
         output(fetch="false", notify=str(not abruf.get("benachrichtigt", False)).lower())
         return
+
+    # Spread scheduled requests across ten minutes; paused runs return above.
+    if os.environ.get("SCHEDULE"):
+        wartezeit = random.randint(0, 600)
+        print(f"Zufaelliger Abruf-Offset: {wartezeit} Sekunden", flush=True)
+        time.sleep(wartezeit)
 
     try:
         karaffe, _ = lese_unique("Karaffenaffe")
