@@ -5,12 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       resume_untappd:
-        description: 'Abrufe nach HTTP 403/429 bewusst wieder freigeben'
+        description: 'Pausierte Abrufe nach Prüfung bewusst wieder freigeben'
         type: boolean
         default: false
   schedule:
     - cron: '7 * * * *'
-    - cron: '22,37,52 * * * *'
 
 concurrency:
   group: bierbot-daten-aktualisieren
@@ -60,18 +59,13 @@ jobs:
           pfad = Path("alarm-status.json")
           zustand = json.loads(pfad.read_text(encoding="utf-8"))
           abruf = zustand["untappd_abruf"]
-          if abruf["modus"] == "pausiert":
-              text = (
-                  f"🚫 Untappd HTTP {abruf['http_status']}: Abrufe pausiert. "
-                  "Bitte Ursache prüfen und danach den Workflow mit "
-                  "'resume_untappd' manuell starten."
-              )
-          else:
-              text = (
-                  f"⚠️ Untappd HTTP {abruf['http_status']}: "
-                  "Abrufe für den Rest des Berliner Tages nur stündlich. "
-                  "Morgen wieder alle 15 Minuten."
-              )
+          status = abruf.get("http_status")
+          fehler = f"HTTP {status}" if status else abruf.get("fehler", "Abruffehler")
+          text = (
+              f"🚫 Untappd {fehler}: Abrufe pausiert. "
+              "Bitte Ursache prüfen und danach den Workflow mit "
+              "'resume_untappd' manuell freigeben."
+          )
           post = urllib.parse.urlencode({
               "chat_id": os.environ["CHAT_ID"], "text": text
           }).encode("utf-8")
