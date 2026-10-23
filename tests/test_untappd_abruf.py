@@ -1,9 +1,11 @@
 import json
+import io
 import os
 import sys
 import tempfile
 import unittest
 from datetime import datetime
+from contextlib import redirect_stdout
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import untappd_abruf as abruf
+import untappd_diagnose as diagnose
 
 
 class Clock:
@@ -111,9 +114,20 @@ class AbrufTests(unittest.TestCase):
         self.assertEqual(self.output(), {"fetch": "true", "notify": "false"})
 
     def test_http_403_stays_paused(self):
-        self.transport.side_effect = [response(status=403)]
-        abruf.main()
+        self.transport.side_effect = [response(
+            "<title>Just a moment...</title>",
+            status=403,
+            headers={"Server": "cloudflare", "cf-mitigated": "challenge", "CF-Ray": "test-ray"},
+        )]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            abruf.main()
         self.assertEqual(self.transport.call_count, 1)
+        log = next(line for line in output.getvalue().splitlines() if line.startswith("Untappd-Diagnose: "))
+        logged = json.loads(log.removeprefix("Untappd-Diagnose: "))
+        self.assertEqual(logged["status"], 403)
+        self.assertEqual(logged["headers"]["cf-mitigated"], "challenge")
+        self.assertEqual(logged["title"], "Just a moment...")
         pause = self.status_json()["untappd_abruf"]
         self.assertEqual(pause["modus"], "pausiert")
         self.assertEqual(pause["http_status"], 403)
@@ -215,6 +229,90 @@ class AbrufTests(unittest.TestCase):
         self.assertEqual(self.status_json()["untappd_abruf"]["modus"], "pausiert")
         self.assertEqual(json.loads(self.data.read_text(encoding="utf-8")), {"fettleber_total": 100})
         self.assertEqual(self.output(), {"fetch": "false", "notify": "true"})
+
+
+class DiagnoseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1])
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.status = root / "alarm-status.json"
+        self.data = root / "bierstand.json"
+        self.summary = root / "summary.md"
+        self.status.write_text('{"untappd_abruf": {"modus": "pausiert"}}', encoding="utf-8")
+        self.data.write_text('{"karaffenaffe": 2383}', encoding="utf-8")
+        self.original_status = self.status.read_bytes()
+        self.original_data = self.data.read_bytes()
+        patches = [
+            patch.object(abruf, "STATUS_FILE", self.status),
+            patch.object(abruf, "DATA_FILE", self.data),
+            patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(self.summary)}),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        transport_patch = patch.object(
+            requests.adapters.HTTPAdapter,
+            "send",
+            side_effect=AssertionError("Unexpected network request"),
+        )
+        self.transport = transport_patch.start()
+        self.addCleanup(transport_patch.stop)
+
+    def test_one_request_preserves_state_and_limits_logged_fields(self):
+        for status in (200, 403, 302):
+            with self.subTest(status=status):
+                self.summary.write_text("", encoding="utf-8")
+                self.transport.reset_mock(side_effect=True)
+                reply = response(
+                    "<title>Test &lt;script&gt; &amp; title</title><p>private-body-value</p>",
+                    status=status,
+                    headers={
+                        "Server": "cloudflare",
+                        "cf-mitigated": "challenge",
+                        "Set-Cookie": "private-cookie-value",
+                        "Authorization": "private-auth-value",
+                        "Location": "https://untappd.com/must-not-be-followed",
+                    },
+                )
+
+                def send(request, **_kwargs):
+                    self.assertEqual(self.transport.call_count, 1)
+                    reply.request = request
+                    reply.url = request.url
+                    return reply
+
+                self.transport.side_effect = send
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = diagnose.main()
+                self.assertEqual(result, 0 if status == 200 else 1)
+                self.assertEqual(self.transport.call_count, 1)
+                sent = self.transport.call_args
+                self.assertEqual(sent.args[0].method, "GET")
+                self.assertIn("/user/Karaffenaffe?bierbot_refresh=", sent.args[0].url)
+                self.assertEqual(sent.kwargs["timeout"], (5, 20))
+                summary = self.summary.read_text(encoding="utf-8")
+                self.assertIn("&lt;script&gt;", summary)
+                self.assertNotIn("<script>", summary)
+                for secret in ("private-cookie-value", "private-auth-value", "private-body-value"):
+                    self.assertNotIn(secret, output.getvalue())
+                    self.assertNotIn(secret, summary)
+                self.assertEqual(self.status.read_bytes(), self.original_status)
+                self.assertEqual(self.data.read_bytes(), self.original_data)
+
+    def test_timeout_is_not_retried_or_logged_with_sensitive_details(self):
+        self.transport.side_effect = requests.ReadTimeout("private-exception-value")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = diagnose.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(self.transport.call_count, 1)
+        self.assertIn("ReadTimeout", output.getvalue())
+        self.assertNotIn("private-exception-value", output.getvalue())
+        self.assertNotIn("private-exception-value", self.summary.read_text(encoding="utf-8"))
+        self.assertEqual(self.status.read_bytes(), self.original_status)
+        self.assertEqual(self.data.read_bytes(), self.original_data)
 
 
 if __name__ == "__main__":

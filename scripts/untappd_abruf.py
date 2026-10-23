@@ -46,18 +46,42 @@ def output(**values):
             handle.write(f"{key}={value}\n")
 
 
-def lese_unique(session, nutzer):
+def profil_url(nutzer):
     # A stable key per hourly slot avoids duplicate cache keys within one
     # scheduled interval while allowing the next hourly run to request a fresh representation.
     slot = int(datetime.now(timezone.utc).timestamp()) // MAX_CACHE_AGE
-    url = f"https://untappd.com/user/{nutzer}?" + urllib.parse.urlencode(
+    return f"https://untappd.com/user/{nutzer}?" + urllib.parse.urlencode(
         {"bierbot_refresh": slot}
     )
-    with session.get(url, timeout=(5, 20)) as res:
+
+
+def log_response(res, nutzer):
+    # Only record selected metadata; never log cookies, credentials or raw HTML.
+    felder = (
+        "Server", "Date", "Age", "Cache-Control", "CF-Cache-Status",
+        "CF-Ray", "cf-mitigated", "Retry-After", "Content-Type",
+    )
+    anfang = res.content[:65536].decode("utf-8", "replace")
+    titel = re.search(r"<title\b[^>]*>(.*?)</title\s*>", anfang, re.I | re.S)
+    titel_text = (
+        " ".join(html.unescape(re.sub(r"<[^>]+>", " ", titel.group(1))).split())[:240]
+        if titel else None
+    )
+    diagnose = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "profile": nutzer,
+        "status": res.status_code,
+        "headers": {feld: res.headers[feld][:400] for feld in felder if feld in res.headers},
+        "title": titel_text,
+    }
+    print("Untappd-Diagnose: " + json.dumps(diagnose, ensure_ascii=True), flush=True)
+    return diagnose
+
+
+def lese_unique(session, nutzer):
+    with session.get(profil_url(nutzer), timeout=(5, 20)) as res:
+        log_response(res, nutzer)
         res.raise_for_status()
-        print(f"=== Diagnose {nutzer} ===")
-        for feld in ("Date", "Age", "Cache-Control", "CF-Cache-Status", "ETag"):
-            print(f"{feld}: {res.headers.get(feld, 'nicht vorhanden')}")
         age = res.headers.get("Age")
         if age is not None and int(age) > MAX_CACHE_AGE:
             raise StaleProfileError(f"{nutzer}: Cache bereits {age} Sekunden alt")

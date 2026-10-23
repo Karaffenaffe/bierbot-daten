@@ -1,0 +1,27 @@
+name: Untappd Einzel-Diagnose
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: untappd-einzel-diagnose
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Repository laden
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Python-Abhaengigkeiten installieren
+        run: python -m pip install -r requirements.txt
+
+      - name: Genau eine Untappd-Anfrage diagnostizieren
+        run: python scripts/untappd_diagnose.py
