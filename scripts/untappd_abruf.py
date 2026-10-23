@@ -6,18 +6,30 @@ import os
 import re
 import random
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import requests
 
 
 STATUS_FILE = Path("alarm-status.json")
 DATA_FILE = Path("bierstand.json")
 BERLIN = ZoneInfo("Europe/Berlin")
 MAX_CACHE_AGE = 60 * 60
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
+        "Gecko/20100101 Firefox/128.0"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+}
 
 
 class StaleProfileError(Exception):
@@ -34,31 +46,22 @@ def output(**values):
             handle.write(f"{key}={value}\n")
 
 
-def lese_unique(nutzer):
+def lese_unique(session, nutzer):
     # A stable key per hourly slot avoids duplicate cache keys within one
     # scheduled interval while allowing the next hourly run to request a fresh representation.
     slot = int(datetime.now(timezone.utc).timestamp()) // MAX_CACHE_AGE
     url = f"https://untappd.com/user/{nutzer}?" + urllib.parse.urlencode(
         {"bierbot_refresh": slot}
     )
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "text/html",
-            "Cache-Control": "no-cache",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as res:
-        if res.status != 200:
-            raise urllib.error.HTTPError(req.full_url, res.status, "HTTP error", res.headers, None)
+    with session.get(url, timeout=(5, 20)) as res:
+        res.raise_for_status()
         print(f"=== Diagnose {nutzer} ===")
         for feld in ("Date", "Age", "Cache-Control", "CF-Cache-Status", "ETag"):
             print(f"{feld}: {res.headers.get(feld, 'nicht vorhanden')}")
         age = res.headers.get("Age")
         if age is not None and int(age) > MAX_CACHE_AGE:
             raise StaleProfileError(f"{nutzer}: Cache bereits {age} Sekunden alt")
-        seite = res.read().decode("utf-8", "replace")
+        seite = res.content.decode("utf-8", "replace")
 
     seite = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", seite, flags=re.I | re.S)
     seite = re.sub(r"<[^>]+>", " ", seite)
@@ -106,10 +109,17 @@ def main():
         time.sleep(wartezeit)
 
     try:
-        karaffe, _ = lese_unique("Karaffenaffe")
-        fettleber, fettleber_total = lese_unique("Fettleber")
+        with requests.Session() as session:
+            session.headers.update(BROWSER_HEADERS)
+            karaffe, _ = lese_unique(session, "Karaffenaffe")
+            time.sleep(random.uniform(1.5, 3.5))
+            fettleber, fettleber_total = lese_unique(session, "Fettleber")
     except Exception as fehler:
-        code = fehler.code if isinstance(fehler, urllib.error.HTTPError) else None
+        code = (
+            fehler.response.status_code
+            if isinstance(fehler, requests.HTTPError) and fehler.response is not None
+            else None
+        )
         beschreibung = f"HTTP {code}" if code is not None else type(fehler).__name__
         abruf = {
             "modus": "pausiert",
