@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,13 +27,20 @@ class AbrufTests(unittest.TestCase):
         self.status = Path(self.temp.name) / "alarm-status.json"
         self.data = Path(self.temp.name) / "bierstand.json"
         self.outputs = Path(self.temp.name) / "outputs"
-        self.status.write_text('{"unter30": false, "letzter_checkin_biertag": "2026-10-19"}', encoding="utf-8")
+        self.status.write_text('{"unter30": false}', encoding="utf-8")
         self.data.write_text('{"fettleber_total": 100}', encoding="utf-8")
         self.patches = [
             patch.object(abruf, "STATUS_FILE", self.status),
             patch.object(abruf, "DATA_FILE", self.data),
             patch.object(abruf, "datetime", Clock),
-            patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.outputs), "SCHEDULE": "22,37,52 * * * *", "RESUME_UNTAPPD": "false"}),
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_OUTPUT": str(self.outputs),
+                    "SCHEDULE": "7 * * * *",
+                    "RESUME_UNTAPPD": "false",
+                },
+            ),
         ]
         for item in self.patches:
             item.start()
@@ -44,60 +51,48 @@ class AbrufTests(unittest.TestCase):
         return json.loads(self.status.read_text(encoding="utf-8"))
 
     def output(self):
-        return dict(line.split("=", 1) for line in self.outputs.read_text(encoding="utf-8").splitlines())
+        return dict(
+            line.split("=", 1)
+            for line in self.outputs.read_text(encoding="utf-8").splitlines()
+        )
 
-    def test_transient_error_hourly_then_next_day_quarter_hourly(self):
-        error = urllib.error.HTTPError("https://untappd.com/user/Karaffenaffe", 503, "", {}, None)
-        with patch.object(abruf, "lese_unique", side_effect=error) as fetch:
+    def test_any_fetch_error_pauses_until_manual_resume(self):
+        with patch.object(abruf, "lese_unique", side_effect=ValueError("bad page")) as fetch:
             abruf.main()
             self.assertEqual(fetch.call_count, 1)
-        self.assertEqual(self.status_json()["untappd_abruf"]["modus"], "stuendlich")
+        pause = self.status_json()["untappd_abruf"]
+        self.assertEqual(pause["modus"], "pausiert")
+        self.assertEqual(pause["fehler"], "ValueError")
         self.assertEqual(self.output(), {"fetch": "false", "notify": "true"})
         self.assertEqual(json.loads(self.data.read_text(encoding="utf-8")), {"fettleber_total": 100})
 
-        self.outputs.write_text("", encoding="utf-8")
-        with patch.object(abruf, "lese_unique") as fetch:
-            abruf.main()
-            fetch.assert_not_called()
-
-        os.environ["SCHEDULE"] = "7 * * * *"
-        self.outputs.write_text("", encoding="utf-8")
-        with patch.object(abruf, "lese_unique", side_effect=[(140, 200), (120, 105)]):
-            abruf.main()
-        self.assertEqual(self.output(), {"fetch": "true", "notify": "false"})
-        self.assertEqual(self.status_json()["untappd_abruf"]["modus"], "stuendlich")
-        self.assertEqual(json.loads(self.data.read_text(encoding="utf-8"))["fettleber_neue_checkins"], 5)
-
-        Clock.current = datetime(2026, 10, 21, 0, 22, tzinfo=abruf.BERLIN)
-        os.environ["SCHEDULE"] = "22,37,52 * * * *"
-        self.outputs.write_text("", encoding="utf-8")
-        with patch.object(abruf, "lese_unique", side_effect=[(141, 201), (121, 106)]):
-            abruf.main()
-        self.assertNotIn("untappd_abruf", self.status_json())
-        self.assertIn("letzter_checkin_biertag", self.status_json())
-        self.assertEqual(self.output(), {"fetch": "true", "notify": "false"})
-
-    def test_429_stays_paused_until_manual_resume(self):
-        error = urllib.error.HTTPError("https://untappd.com/user/Karaffenaffe", 429, "", {}, None)
-        with patch.object(abruf, "lese_unique", side_effect=error):
-            abruf.main()
-        self.assertEqual(self.status_json()["untappd_abruf"]["modus"], "pausiert")
-
+        pause["benachrichtigt"] = True
+        self.status.write_text(json.dumps(self.status_json()), encoding="utf-8")
         Clock.current = datetime(2026, 10, 21, 12, 22, tzinfo=abruf.BERLIN)
         self.outputs.write_text("", encoding="utf-8")
         with patch.object(abruf, "lese_unique") as fetch:
             abruf.main()
             fetch.assert_not_called()
-        self.assertEqual(self.output(), {"fetch": "false", "notify": "true"})
+        self.assertEqual(self.output(), {"fetch": "false", "notify": "false"})
 
         os.environ["RESUME_UNTAPPD"] = "true"
         self.outputs.write_text("", encoding="utf-8")
-        with patch.object(abruf, "lese_unique", side_effect=[(140, 200), (120, 105)]):
+        with patch.object(abruf, "lese_unique", side_effect=[(140, 200), (120, 105)]) as fetch:
             abruf.main()
+            self.assertEqual(fetch.call_count, 2)
         self.assertNotIn("untappd_abruf", self.status_json())
         self.assertEqual(self.output(), {"fetch": "true", "notify": "false"})
 
-    def test_cache_key_changes_by_quarter_and_stale_page_is_not_saved(self):
+    def test_http_403_stays_paused(self):
+        error = urllib.error.HTTPError("https://untappd.com/user/Karaffenaffe", 403, "", {}, None)
+        with patch.object(abruf, "lese_unique", side_effect=error):
+            abruf.main()
+        pause = self.status_json()["untappd_abruf"]
+        self.assertEqual(pause["modus"], "pausiert")
+        self.assertEqual(pause["http_status"], 403)
+        self.assertEqual(self.output(), {"fetch": "false", "notify": "true"})
+
+    def test_stale_profile_error_also_pauses(self):
         class Response:
             status = 200
             headers = {"Age": "12224", "CF-Cache-Status": "HIT"}
@@ -111,18 +106,27 @@ class AbrufTests(unittest.TestCase):
         with patch.object(abruf.urllib.request, "urlopen", return_value=Response()) as fetch:
             abruf.main()
         self.assertEqual(fetch.call_count, 1)
-        request = fetch.call_args.args[0]
-        self.assertIn("bierbot_refresh=", request.full_url)
-        self.assertEqual(request.get_header("Cache-control"), "no-cache")
-        self.assertEqual(self.output(), {"fetch": "false", "notify": "false"})
+        self.assertEqual(self.status_json()["untappd_abruf"]["fehler"], "StaleProfileError")
+        self.assertEqual(self.output(), {"fetch": "false", "notify": "true"})
         self.assertEqual(json.loads(self.data.read_text(encoding="utf-8")), {"fettleber_total": 100})
 
-        first_url = request.full_url
-        Clock.current = datetime(2026, 10, 20, 12, 37, tzinfo=abruf.BERLIN)
-        with patch.object(abruf.urllib.request, "urlopen", return_value=Response()) as fetch:
-            with self.assertRaises(abruf.StaleProfileError):
-                abruf.lese_unique("Karaffenaffe")
-        self.assertNotEqual(first_url, fetch.call_args.args[0].full_url)
+    def test_existing_pause_is_not_cleared_on_next_day(self):
+        self.status.write_text(
+            json.dumps({
+                "untappd_abruf": {
+                    "modus": "pausiert",
+                    "datum": "2026-10-20",
+                    "http_status": 403,
+                    "benachrichtigt": True,
+                }
+            }),
+            encoding="utf-8",
+        )
+        Clock.current = datetime(2026, 10, 21, 12, 22, tzinfo=abruf.BERLIN)
+        with patch.object(abruf, "lese_unique") as fetch:
+            abruf.main()
+            fetch.assert_not_called()
+        self.assertEqual(self.output(), {"fetch": "false", "notify": "false"})
 
 
 if __name__ == "__main__":
